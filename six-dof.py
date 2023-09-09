@@ -57,8 +57,7 @@ def apparent_mass(density, arc, span, chord, thickness, rigging):
                 1 - relative_thickness ** 2)) * thickness ** 2 * chord
     C = 0.785 * density * np.sqrt(1 + 2 * arc_to_span ** 2 * (1 - relative_thickness ** 2)) * aspect / (
                 1 + aspect) * chord ** 2 * span
-    #return body_to_parafoil(rigging).T @ np.diag([A, B, C]) @ body_to_parafoil(rigging)
-    return np.zeros((3,3))
+    return body_to_parafoil(rigging).T @ np.diag([A, B, C]) @ body_to_parafoil(rigging)
 
 def mass_matrix(mass, density, span, chord):
     """matrix capturing mass of payload, canopy, entrapped air"""
@@ -76,8 +75,8 @@ def apparent_inertia(density, arc, span, chord, thickness, rigging):
     Ia = 0.055 * density * aspect_ratio/(1 + aspect_ratio) * chord**2 * span**3
     Ib = 0.0308 * density * aspect_ratio/(1 + aspect_ratio) * (1 + np.pi/6 * (1 + aspect_ratio) * aspect_ratio * (arc_span_ratio * relative_thickness)**2 ) * chord**4 * span
     Ic = 0.0555 * density * (1 + 8 * arc_span_ratio**2) * thickness**2 * span**3
-    #return R.T @ np.diag([Ia, Ib, Ic]) @ R
-    return np.zeros((3, 3))
+    return R.T @ np.diag([Ia, Ib, Ic]) @ R
+
 
 def skew_symmetric(vector):
     """generate skew symmetric matrix from a 3D vector"""
@@ -168,6 +167,13 @@ def aerodynamic_moment(angular_v, dynamic_pressure, surface_area, aoa, aos, airs
             span * (cn_aos * aos + span/(2 * airspeed) * cn_p * p + span/(2 * airspeed) * cn_r * r + cn_asym * asym_def),
         ])
 
+def euler_rate_to_anguler(phi, theta, ang_v):
+    return np.array([
+        [1, np.sin(phi) * np.tan(theta), np.cos(phi) * np.tan(theta)],
+        [0, np.cos(phi), -np.sin(phi)],
+        [0, np.sin(phi)/np.cos(theta), np.cos(phi)/np.cos(theta)]
+    ]) @ ang_v
+
 m = 2.4
 a = 0.1
 b = 1.35
@@ -176,7 +182,7 @@ t = 0.075
 S = 1
 rho = 1.293
 mu = -12 * np.pi /180
-wind = np.array([0,0,0])
+wind = np.array([1,1,0])
 I = np.array([[0.42,0,0.03], [0,0.4,0], [0.03,0,0.053]])
 r_bm = np.array([0.046,0,-1.11])
 C_D0 = 0.25
@@ -197,6 +203,7 @@ C_nr = -0.27
 C_nasym = 0.0115
 alpha = 5*np.pi/180
 beta = 2 * np.pi/180
+
 
 def dynamics(time, state):
     u,v,w, p,q,r, x,y,z, phi,theta,psi = tuple(state)
@@ -224,30 +231,34 @@ def dynamics(time, state):
 
 
     velocity = geo_to_body(phi, theta, psi).T @ lin_v
+    return np.concatenate((np.linalg.inv(A) @ B, velocity, euler_rate_to_anguler(phi, theta, ang_v)))
 
-    return np.concatenate((np.linalg.inv(A) @ B, velocity, ang_v))
-
-def simplified_dynamics(t, state):
+def simplified_dynamics(time, state):
     u,v,w, p,q,r, x,y,z, phi,theta,psi = tuple(state)
 
     lin_v = np.array([u,v,w])
     ang_v = np.array([p,q,r])
-    position = np.array([x,y,z])
     angle = np.array([phi, theta, psi])
-    Va = airspeed(lin_v, angle, np.zeros(3))
+
+    total_mass = mass_matrix(m, rho, b,c)
+    Cross_omega = skew_symmetric(ang_v)
+
+    Va = airspeed(lin_v, angle,wind)
     Q = dynamic_pressure(Va, rho)
-    A = np.block([[mass_matrix(m,rho,b,c),np.zeros((3,3))],
-                  [np.zeros((3,3)), I]])
-    B1 = weight_force(angle, m) #+ aerodynamic_force(Q, alpha,beta,S,0,C_D0,C_L0,C_Dalpha2,C_Lalpha,C_Ybeta, 0,0)
-    B2 = aerodynamic_moment(ang_v,Q,S,alpha,beta,Va,0,b,c,C_lbeta,C_lp,C_lr,C_lasym,C_m0,C_malpha, C_mq, C_nbeta, C_np,C_nr, C_nasym)
-    geo_v = geo_to_body(phi, theta, psi).T @ lin_v
-
+    B1 = weight_force(angle, m) - Cross_omega @ total_mass @ lin_v
+    B2 = aerodynamic_moment(ang_v,Q,S,alpha,beta,Va,0,b,c,C_lbeta,C_lp,C_lr,C_lasym,C_m0,C_malpha, C_mq, C_nbeta, C_np,C_nr, C_nasym) - Cross_omega @ I @ ang_v
     B = np.concatenate((B1,B2))
-    return np.concatenate((np.linalg.inv(A) @ B, geo_v, ang_v))
+    A = np.block([
+        [total_mass, np.zeros((3,3))],
+        [np.zeros((3,3)), I]])
+
+
+    velocity = geo_to_body(phi, theta, psi).T @ lin_v
+    return np.concatenate((np.linalg.inv(A) @ B, velocity, euler_rate_to_anguler(phi, theta, ang_v)))
 
 
 
-results = sp.integrate.solve_ivp(simplified_dynamics, [0,90], np.array([0,0,-10,0,0,0,0,0,1000,0.0,0.0,0.0]))
+results = sp.integrate.solve_ivp(dynamics, [0,90], np.array([0,0,10,0,0,0,0,0,1000,0.0,-np.pi,0.0]))
 path = results.y[-6:-3,:]
 ax = plt.figure().add_subplot(projection='3d')
 
@@ -259,4 +270,9 @@ x,y,z = path[0,:], path[1,:], path[2,:]
 ax.plot(x, y, z, label='flight path')
 ax.legend()
 
+plt.show()
+
+t = np.linspace(0,90,num = len(z))
+plt.title("t vs z")
+plt.plot(t,  z)
 plt.show()
